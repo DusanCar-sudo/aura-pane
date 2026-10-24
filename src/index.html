@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en" class="mode-auto">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Aura</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="edge" id="edge" aria-hidden="true"></div>
+
+  <main class="pane" id="pane">
+    <header class="clock">
+      <span id="time">--:--</span>
+      <span id="date"></span>
+    </header>
+
+    <section class="recent" id="recentSection" aria-label="Recent windows">
+      <h2>RECENT</h2>
+      <ul id="recentList"></ul>
+    </section>
+
+    <div class="spacer"></div>
+
+    <section class="aura" aria-label="Aura">
+      <div class="aura-head">
+        <span class="dot" id="dot"></span>
+        <span class="name">Aura</span>
+        <span class="status" id="status">local · ready</span>
+        <button class="icon-btn" id="pinBtn" aria-label="Pin pane (keep docked)" aria-pressed="false">
+          <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5M9 3h6l-1 6 4 4H6l4-4-1-6z"/></svg>
+        </button>
+        <button class="icon-btn" id="expandBtn" aria-label="Expand Aura" aria-expanded="false">
+          <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
+        </button>
+      </div>
+
+      <div class="feed" id="feed" aria-live="polite"></div>
+
+      <div class="aura-ring" id="ring">
+        <form class="composer" id="composer">
+          <label for="q" class="sr-only">Ask Aura</label>
+          <input id="q" autocomplete="off" placeholder="Ask Aura…  (Super + I)">
+          <button type="submit" class="send" aria-label="Send">
+            <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+          </button>
+        </form>
+      </div>
+    </section>
+  </main>
+  <script src="main.js"></script>
+</body>
+</html>
