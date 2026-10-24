@@ -10,14 +10,28 @@
   <div class="edge" id="edge" aria-hidden="true"></div>
 
   <main class="pane" id="pane">
-    <header class="clock">
-      <span id="time">--:--</span>
-      <span id="date"></span>
-    </header>
+    <div class="side">
+      <header class="clock">
+        <span id="time">--:--</span>
+        <span id="date"></span>
+      </header>
 
-    <section class="recent" id="recentSection" aria-label="Recent windows">
-      <h2>RECENT</h2>
-      <ul id="recentList"></ul>
+      <section class="recent" id="recentSection" aria-label="Recent windows">
+        <h2>RECENT</h2>
+        <ul id="recentList"></ul>
+      </section>
+    </div>
+
+    <section class="system" id="systemView" aria-label="PC health" hidden>
+      <div class="system-head">
+        <span class="system-title">PC health · last 7 days</span>
+        <span class="system-score" id="systemScore">--%</span>
+        <button class="icon-btn" id="systemClose" aria-label="Close PC health">
+          <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+      <canvas id="graph" aria-label="Health, CPU, memory and temperature graphs"></canvas>
+      <ul class="issues" id="healthIssues"></ul>
     </section>
 
     <div class="spacer"></div>
@@ -27,6 +41,10 @@
         <span class="dot" id="dot"></span>
         <span class="name">Aura</span>
         <span class="status" id="status">local · ready</span>
+        <button class="badge" id="health" aria-label="PC health — open graph">--%</button>
+        <button class="icon-btn" id="edgeBtn" aria-label="Move pane to the bottom">
+          <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path id="edgeIcon" d="M15 4v16"/></svg>
+        </button>
         <button class="icon-btn" id="pinBtn" aria-label="Pin pane (keep docked)" aria-pressed="false">
           <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5M9 3h6l-1 6 4 4H6l4-4-1-6z"/></svg>
         </button>
@@ -37,10 +55,12 @@
 
       <div class="feed" id="feed" aria-live="polite"></div>
 
+      <ul class="apps" id="apps" role="listbox" aria-label="Apps" hidden></ul>
+
       <div class="aura-ring" id="ring">
         <form class="composer" id="composer">
           <label for="q" class="sr-only">Ask Aura</label>
-          <input id="q" autocomplete="off" placeholder="Ask Aura…  (Super + I)">
+          <input id="q" autocomplete="off" placeholder="Ask Aura, or type an app…  (Super + I)">
           <button type="submit" class="send" aria-label="Send">
             <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
           </button>
