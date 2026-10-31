@@ -67,6 +67,9 @@ sway/aura-pane.conf     exec + Super+I binding (symlinked into ~/.config/sway/co
 - **Music** (`audio.rs`): every 2s `pactl -f json list sink-inputs`; if a stream is uncorked, `parec -d @DEFAULT_MONITOR@` (8kHz mono) → bass-weighted onset level → `aura://beat` ~30/s + `aura://music` on/off. `html.music` swaps the breathing for `--beat`-driven opacity/halo/glow on every edge. parec is killed once nothing plays, so the sink can suspend.
 - Rainbow ring around the composer (approved design — keep it): `@property --aura-a` + `conic-gradient`, `.on` when focused, `.busy` spins fast while thinking.
 
+### Message area
+- Side mode: `.aura` is `flex: 0 1 75%` of the pane (all of it when expanded); `.feed` fills it, messages hug the composer and fade out at the top (mask). System view keeps the 96px feed.
+
 ### Recent windows
 - `seed_recent`: `swaymsg -r -t get_tree`. `watch_sway`: `swaymsg -r -m -t subscribe '["window"]'` → emits `aura://recent`.
 
@@ -79,10 +82,13 @@ sway/aura-pane.conf     exec + Super+I binding (symlinked into ~/.config/sway/co
 - UI: `--%` badge in the Aura header (ok ≥80, warn ≥50, else bad). Typing `system` or `health` + Enter, or clicking the badge, expands the pane to a btop-style graph (health, cpu, mem, temp; 3px cells green→yellow→red, from aura-sysmon's `btop_graph`) over the last 7 days + the issue list.
 
 ### Engine
+- **Agent first (full aura-code toolset).** Each message opens a WebSocket from `engine_ws()` (`ws://127.0.0.1:7337/?token=…`, derived from `$AURA_ENDPOINT`) and sends `{type:"task", task}`. The legacy aura-serve protocol streams `text`, `tool_call` (shown as a dim `⚙` line), `confirm_request` (Allow/Deny buttons → `confirm_response`), `error`, then `done`/`plan_done`. The agent starts every task with an empty history, so `withContext()` prepends the last 6 turns. `/approve all` makes the pane answer every `confirm_request` with yes, shown as a dim `✓ auto-approved` line; it is saved in localStorage `aura.approve` and the status reads `· auto-approve`. `/approve ask` turns it off and bare `/approve` toggles. If the socket can't open, or no frame arrives within 30 s (`AGENT_START_MS`), the pane falls back to `ask` below. Seen 2026-10-24: aura-serve wedged on a dead upstream socket. Chat still answered but tasks hung; `systemctl --user restart aura-serve` cleared it.
+- **Click outside retracts.** While the pane is slid out in auto-hide, `apply_layout` lifts it to Layer::Overlay and `sync_catchers` maps one transparent full-output Top layer (`aura-pane-catcher`, no keyboard) per monitor. A click on any of them hides them all first (so they can never eat more than one click) and emits `aura://outside`, and JS force-hides the pane (a draft stays in the box). The click point (monitor geometry + local position) goes through `window_at` over `get_tree` to focus the window under it, so that click doesn't need repeating, though the app never sees the click itself. `watch_sway` also emits `aura://outside` on window focus changes.
+- **Screens.** The monitor button in the header (`next_screen`) moves the pane to the next GDK monitor with `set_monitor`. Not persisted: after a restart sway picks the output.
 - `ask(messages)` → POST `$AURA_ENDPOINT` (default `http://127.0.0.1:7337/v1/chat/completions`, the always-on aura-serve) with `{"messages":[...]}`; reply = `choices[0].message.content`.
 - Bearer token read at call time from `$AURA_TOKEN` or `~/.aura/server-token` — never hardcode it. Timeout 180s, no streaming.
 - JS sends the last turns (greeting and error lines dropped); Rust keeps the last 12 user/assistant messages.
-- Rust prepends a **system prompt** (`system_prompt`): Aura persona, what the pane can do (apps, `system` graph), "can't run commands yet", and the latest health sample. Without it aura-serve's `/v1/chat/completions` answers as a bare model.
+- Rust prepends a **system prompt** (`system_prompt`): Aura persona, what the pane can do (apps, `system` graph), "agent tools offline" (fallback only), and the latest health sample. Without it aura-serve's `/v1/chat/completions` answers as a bare model.
 - JS opens the graph for natural requests too ("graph", "chart", "how is the system doing") and still sends them to Aura to explain.
 
 ### Hotkey

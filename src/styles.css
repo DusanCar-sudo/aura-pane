@@ -76,41 +76,37 @@ html.mode-auto:not(.shown) .pane {
 html.edge-bottom.mode-auto:not(.shown) .pane { transform: translateY(calc(100% + var(--glow-pad))); }
 
 /* ---------- living rainbow edge ---------- */
-/* ::before is the crisp line, ::after its blurred halo spilling into the glow band. */
+/* ::before is the crisp ring, ::after its blurred halo. A conic rainbow masked to the
+   pane border; spinning --aura-a sends the colours round and round. */
 .pane::before, .pane::after {
   content: "";
   position: absolute;
-  top: 8px;
-  bottom: 8px;
-  left: -2px;
-  width: 3px;
-  border-radius: 3px;
-  background: linear-gradient(180deg, var(--colors));
-  background-size: 100% 200%;
+  inset: -1px;
+  border-radius: inherit;
+  padding: 3px;
+  /* inline, not var(--rainbow): that resolves --aura-a once on :root and would not spin */
+  background: conic-gradient(from var(--aura-a), var(--colors));
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
   pointer-events: none;
-  animation: flow-y 14s linear infinite, breathe var(--breathe) ease-in-out infinite;
+  animation: spin 6s linear infinite, breathe var(--breathe) ease-in-out infinite;
 }
-.pane::after { left: -7px; width: 12px; filter: blur(7px); }
+.pane::after { padding: 8px; filter: blur(7px); }
 
-/* Bottom: the top edge, always softly lit. */
+/* Bottom: same ring, always softly lit. */
 html.edge-bottom .pane::before, html.edge-bottom .pane::after {
-  top: -2px; bottom: auto; left: 8px; right: 8px;
-  width: auto; height: 3px;
-  background: linear-gradient(90deg, var(--colors));
-  background-size: 200% 100%;
-  animation: flow-x 14s linear infinite, glow 6s ease-in-out infinite;
+  animation: spin 6s linear infinite, glow 6s ease-in-out infinite;
 }
-html.edge-bottom .pane::after { top: -7px; height: 12px; }
 
 /* Music: --beat (0..1, ~30/s from audio.rs) drives brightness, halo and glow instead of breathing. */
 html.music .pane::before, html.music .pane::after, html.music .edge {
-  animation-name: flow-y, none;
   opacity: calc(.3 + .7 * var(--beat, 0));
   transition: opacity 70ms linear, transform 70ms linear, box-shadow 70ms linear;
 }
-html.music .pane::after { transform: scaleX(calc(1 + .8 * var(--beat, 0))); }
-html.music.edge-bottom .pane::before, html.music.edge-bottom .pane::after, html.music.edge-bottom .edge { animation-name: flow-x, none; }
-html.music.edge-bottom .pane::after { transform: scaleY(calc(1 + .8 * var(--beat, 0))); }
+html.music .pane::before, html.music .pane::after { animation-name: spin, none; }
+html.music .edge { animation-name: flow-y, none; }
+html.music.edge-bottom .edge { animation-name: flow-x, none; }
 html.music .edge { box-shadow: 0 0 calc(10px * var(--beat, 0)) calc(3px * var(--beat, 0)) color-mix(in srgb, var(--accent) 80%, transparent); }
 
 /* Hidden: an 8px hit target with a 3px visible line at the screen edge. */

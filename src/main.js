@@ -36,6 +36,7 @@ const state = {
   expanded: false,
   system: false,
   auto: load("aura.autohide", "1") !== "0",
+  approveAll: load("aura.approve", "ask") === "all", // "/approve all": answer every agent prompt with yes
   bottom: load("aura.edge", "right") === "bottom",
   shown: false,
   hovering: false,
@@ -90,7 +91,7 @@ function render() {
   const glow = state.focused || state.busy;
   ring.className = "aura-ring" + (state.busy ? " busy" : state.focused ? " on" : "");
   dot.classList.toggle("live", glow);
-  status.textContent = state.busy ? "thinking…" : state.focused ? "listening" : "aura-serve · ready";
+  status.textContent = (state.busy ? "thinking…" : state.focused ? "listening" : "aura-serve · ready") + (state.approveAll ? " · auto-approve" : "");
 
   root.classList.toggle("mode-auto", state.auto);
   root.classList.toggle("shown", state.shown);
@@ -111,7 +112,8 @@ function render() {
     ...shown.map((m) => {
       const el = document.createElement("div");
       el.className = "msg " + m.who;
-      el.textContent = m.text;
+      el.textContent = m.text + (m.answer ? " — " + m.answer : "");
+      if (m.who === "ask" && !m.answer) el.append(confirmButtons(m));
       return el;
     })
   );
@@ -462,6 +464,140 @@ new ResizeObserver(() => { if (state.system) drawGraph(); }).observe(graph);
 healthBtn.addEventListener("click", () => (state.system ? closeSystem() : openSystem()));
 $("systemClose").addEventListener("click", () => closeSystem());
 
+// ---------- agent ----------
+// The full aura-code agent (shell, files, web, every tool) runs on aura-serve's
+// WebSocket. One socket per task: approvals belong to the socket that asked.
+const CONTEXT_TURNS = 6;
+const CONTEXT_CHARS = 600;
+const AGENT_START_MS = 30000; // a wedged engine accepts the task and never answers
+
+function confirmButtons(m) {
+  const row = document.createElement("div");
+  row.className = "choices";
+  for (const [label, approved] of [["Allow", true], ["Deny", false]]) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = label;
+    b.addEventListener("click", () => {
+      m.ws.send(JSON.stringify({ type: "confirm_response", id: m.id, approved }));
+      m.answer = approved ? "allowed" : "denied";
+      render();
+    });
+    row.append(b);
+  }
+  return row;
+}
+
+function toolLine(name, input) {
+  const arg = input && (input.command ?? input.path ?? input.file_path ?? input.url ?? input.query);
+  const text = typeof arg === "string" ? arg : JSON.stringify(input ?? "");
+  return `⚙ ${name}  ${text.length > 120 ? text.slice(0, 117) + "…" : text}`;
+}
+
+// The agent starts every task with an empty history, so carry the last few turns in.
+function withContext(prompt) {
+  const past = chatHistory().slice(-CONTEXT_TURNS - 1, -1);
+  if (past.length === 0) return prompt;
+  const lines = past.map((m) => `${m.role === "user" ? "Dule" : "Aura"}: ${m.content.slice(0, CONTEXT_CHARS)}`);
+  return `Earlier in this chat (Aura pane):\n${lines.join("\n")}\n\nNow: ${prompt}`;
+}
+
+/** Resolves when the task ends; rejects only if the socket never opened. */
+async function runAgent(task) {
+  const url = await invoke("engine_ws");
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(url);
+    let opened = false;
+    let finished = false;
+    let live = null; // the Aura message being streamed into
+    let spoke = false;
+    const say = (who, text, extra = {}) => {
+      const m = { who, text, ...extra };
+      state.messages.push(m);
+      render();
+      return m;
+    };
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      ws.close();
+      resolve();
+    };
+    let startTimer = 0;
+    ws.onopen = () => {
+      opened = true;
+      ws.send(JSON.stringify({ type: "task", task }));
+      startTimer = setTimeout(() => {
+        finished = true;
+        ws.close();
+        reject(new Error("agent did not start"));
+      }, AGENT_START_MS);
+    };
+    ws.onerror = () => { if (!opened) reject(new Error("agent socket unreachable")); };
+    ws.onclose = () => {
+      if (opened && !finished) say("err", "Aura's engine closed the connection.");
+      finished = true;
+      resolve();
+    };
+    ws.onmessage = (e) => {
+      let msg;
+      try { msg = JSON.parse(e.data); } catch { return; }
+      if (msg.type !== "connected") clearTimeout(startTimer);
+      switch (msg.type) {
+        case "text":
+          if (!live) live = say("aura", "");
+          live.text += msg.text;
+          spoke = true;
+          render();
+          break;
+        case "text_end": live = null; break;
+        case "tool_call": live = null; say("tool", toolLine(msg.name, msg.input)); break;
+        case "tool_blocked": say("err", `${msg.name} blocked: ${msg.reason}`); break;
+        case "confirm_request":
+          if (state.approveAll) {
+            ws.send(JSON.stringify({ type: "confirm_response", id: msg.id, approved: true }));
+            say("tool", "✓ auto-approved: " + msg.message);
+          } else {
+            say("ask", msg.message, { id: msg.id, ws });
+          }
+          break;
+        case "confirm_timeout": {
+          const m = state.messages.find((x) => x.id === msg.id);
+          if (m && !m.answer) { m.answer = "timed out"; render(); }
+          break;
+        }
+        case "error": say("err", "Aura error: " + msg.message); break;
+        case "done":
+        case "plan_done": {
+          const text = msg.text ?? msg.outcome;
+          if (!spoke && text) say("aura", text);
+          finish();
+          break;
+        }
+      }
+    };
+  });
+}
+
+function setApproveAll(on) {
+  state.approveAll = on;
+  save("aura.approve", on ? "all" : "ask");
+  if (on) {
+    // Prompts already on screen get the same answer.
+    for (const m of state.messages) {
+      if (m.who !== "ask" || m.answer) continue;
+      m.ws.send(JSON.stringify({ type: "confirm_response", id: m.id, approved: true }));
+      m.answer = "allowed";
+    }
+  }
+  state.messages.push({
+    who: "tool",
+    text: on ? "Auto-approve ON: Aura runs every tool without asking. /approve ask turns it off."
+             : "Auto-approve OFF: Aura asks before running tools.",
+  });
+  render();
+}
+
 // ---------- send ----------
 function chatHistory() {
   return state.messages
@@ -474,6 +610,12 @@ $("composer").addEventListener("submit", async (e) => {
   const prompt = input.value.trim();
   if (!prompt || state.busy) return;
 
+  const approve = prompt.match(/^\/approve(?:\s+(all|ask|off))?$/i);
+  if (approve) {
+    input.value = "";
+    setApproveAll(approve[1] ? approve[1].toLowerCase() === "all" : !state.approveAll);
+    return;
+  }
   if (/^(system|health)$/i.test(prompt)) {
     input.value = "";
     openSystem();
@@ -492,8 +634,13 @@ $("composer").addEventListener("submit", async (e) => {
   state.busy = true;
   render();
   try {
-    const reply = await invoke("ask", { messages: chatHistory() });
-    state.messages.push({ who: "aura", text: reply });
+    try {
+      await runAgent(withContext(prompt));
+    } catch {
+      // Agent socket down: plain chat still answers.
+      const reply = await invoke("ask", { messages: chatHistory() });
+      state.messages.push({ who: "aura", text: reply });
+    }
   } catch (err) {
     state.messages.push({ who: "err", text: "Aura error: " + err });
   } finally {
@@ -506,6 +653,7 @@ $("composer").addEventListener("submit", async (e) => {
 expandBtn.addEventListener("click", () => setExpanded(!state.expanded));
 pinBtn.addEventListener("click", () => setAuto(!state.auto));
 edgeBtn.addEventListener("click", () => setEdge(!state.bottom));
+$("screenBtn").addEventListener("click", () => invoke("next_screen"));
 
 // ---------- backend events ----------
 // Super+I: Rust has already slid the pane open and grabbed the keyboard.
@@ -519,6 +667,12 @@ listen("aura://focus", () => {
   setTimeout(() => input.focus(), 40);
 });
 listen("aura://recent", (e) => renderRecent(e.payload));
+// Clicked another window: retract even mid-reply or with a draft (the draft stays in the box).
+// The pointer moved onto a catcher without the pane ever seeing pointerleave, so hovering can be stale here.
+listen("aura://outside", () => {
+  state.hovering = false;
+  hide({ force: true });
+});
 listen("aura://health", (e) => showHealth(e.payload));
 // Music playing: the edges pulse with the beat (audio.rs) instead of breathing.
 listen("aura://music", (e) => root.classList.toggle("music", e.payload));

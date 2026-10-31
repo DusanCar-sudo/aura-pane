@@ -49,6 +49,9 @@ thread_local! {
     // GTK objects are !Send: they live on the main thread only.
     static PANE: RefCell<Option<gtk::ApplicationWindow>> = RefCell::new(None);
     static WEBVIEW: RefCell<Option<gtk::Widget>> = RefCell::new(None);
+    // Invisible full-screen layers, one per monitor, under the open pane: a click on one = clicked outside.
+    static CATCHERS: RefCell<Vec<gtk::Window>> = RefCell::new(Vec::new());
+    static APP: RefCell<Option<AppHandle>> = RefCell::new(None);
     static LAYOUT: Cell<Layout> = Cell::new(Layout {
         auto: true,
         shown: false,
@@ -119,8 +122,11 @@ fn apply_layout() {
         (true, true, true) => EXPANDED_H + GLOW_PAD,
     };
     let margin = if open { MARGIN } else { 0 };
+    // Slid out over the tiles: lift the pane to Overlay so the catcher (Top) sits below it.
+    let catch = l.auto && l.shown;
     PANE.with(|p| {
         let Some(w) = p.borrow().clone() else { return };
+        w.set_layer(if catch { Layer::Overlay } else { Layer::Top });
         for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
             // The side facing the screen stays free.
             let inner = matches!((edge, l.bottom), (Edge::Top, true) | (Edge::Left, false));
@@ -139,6 +145,26 @@ fn apply_layout() {
             w.set_size_request(size, -1);
             w.resize(size, 1);
         }
+    });
+    sync_catchers(l.auto && l.shown);
+}
+
+fn sync_catchers(show: bool) {
+    CATCHERS.with(|c| {
+        let mut list = c.borrow_mut();
+        if !show {
+            list.iter().for_each(|w| w.hide());
+            return;
+        }
+        let Some(display) = gtk::gdk::Display::default() else { return };
+        let monitors: Vec<_> = (0..display.n_monitors()).filter_map(|i| display.monitor(i)).collect();
+        // shortcut: rebuilt only when the monitor count changes, not on a same-count swap.
+        if list.len() != monitors.len() {
+            list.drain(..).for_each(|w| w.close());
+            let Some(app) = APP.with(|a| a.borrow().clone()) else { return };
+            *list = monitors.into_iter().map(|m| build_catcher(app.clone(), m)).collect();
+        }
+        list.iter().for_each(|w| w.show_all());
     });
 }
 
@@ -182,12 +208,56 @@ fn setup_layer_shell(win: &WebviewWindow) -> Result<(), Box<dyn std::error::Erro
     });
 
     WEBVIEW.with(|v| *v.borrow_mut() = webview);
+    APP.with(|a| *a.borrow_mut() = Some(win.app_handle().clone()));
     PANE.with(|p| *p.borrow_mut() = Some(pane.clone()));
     apply_layout();
 
     pane.show_all();
     old.hide();
     Ok(())
+}
+
+/// Transparent, keyboard-less, covers the whole output (bar included).
+/// One click anywhere hides them all first, so a stuck catcher can never eat more than one click;
+/// the window under that click still gets focused.
+fn build_catcher(app: AppHandle, monitor: gtk::gdk::Monitor) -> gtk::Window {
+    let catcher = gtk::Window::new(gtk::WindowType::Toplevel);
+    catcher.set_app_paintable(true);
+    if let Some(visual) = WidgetExt::screen(&catcher).and_then(|s| s.rgba_visual()) {
+        catcher.set_visual(Some(&visual));
+    }
+    catcher.connect_draw(|_, cr| {
+        cr.set_operator(gtk::cairo::Operator::Clear);
+        let _ = cr.paint();
+        glib::Propagation::Stop
+    });
+    catcher.init_layer_shell();
+    catcher.set_namespace("aura-pane-catcher");
+    catcher.set_layer(Layer::Top);
+    catcher.set_keyboard_mode(KeyboardMode::None);
+    catcher.set_exclusive_zone(-1);
+    catcher.set_monitor(&monitor);
+    for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
+        catcher.set_anchor(edge, true);
+    }
+    catcher.add_events(gtk::gdk::EventMask::BUTTON_PRESS_MASK);
+    catcher.connect_button_press_event(move |_, ev| {
+        sync_catchers(false);
+        let geo = monitor.geometry();
+        let (x, y) = ev.position();
+        let (x, y) = (geo.x() as i64 + x as i64, geo.y() as i64 + y as i64);
+        let app = app.clone();
+        let _ = app.emit("aura://outside", ());
+        std::thread::spawn(move || {
+            let tree = Command::new("swaymsg").args(["-r", "-t", "get_tree"]).output();
+            let tree = tree.ok().and_then(|o| serde_json::from_slice::<Value>(&o.stdout).ok());
+            if let Some(id) = tree.and_then(|t| window_at(&t, x, y)) {
+                focus_window(app, id);
+            }
+        });
+        glib::Propagation::Stop
+    });
+    catcher
 }
 
 /// sway drops an OnDemand layer's keyboard focus on every arrange_layers
@@ -255,6 +325,25 @@ fn collect(node: &Value, out: &mut Vec<(bool, RecentItem)>) {
     }
 }
 
+/// The visible window under a global layout point; floating wins over tiled (drawn on top).
+fn window_at(node: &Value, x: i64, y: i64) -> Option<i64> {
+    let r = &node["rect"];
+    let inside = |k: &str, len: &str, v: i64| {
+        let start = r[k].as_i64().unwrap_or(0);
+        v >= start && v < start + r[len].as_i64().unwrap_or(0)
+    };
+    let mut hit = None;
+    if node["pid"].as_i64().is_some() && node["visible"] == true && inside("x", "width", x) && inside("y", "height", y) {
+        hit = node["id"].as_i64();
+    }
+    for key in ["nodes", "floating_nodes"] {
+        for child in node[key].as_array().into_iter().flatten() {
+            hit = window_at(child, x, y).or(hit);
+        }
+    }
+    hit
+}
+
 fn seed_recent(app: &AppHandle) {
     let Ok(out) = Command::new("swaymsg").args(["-r", "-t", "get_tree"]).output() else {
         return;
@@ -290,6 +379,8 @@ fn watch_sway(app: AppHandle) {
                 continue;
             };
             let state = app.state::<Recent>();
+            // sway re-sends "focus" for the same window when the pane grabs the keyboard; only a new window counts.
+            let moved = ev["change"] == "focus" && state.0.lock().unwrap().first().map(|i| i.id) != Some(item.id);
             let snapshot = {
                 let mut list = state.0.lock().unwrap();
                 match ev["change"].as_str().unwrap_or("") {
@@ -309,6 +400,10 @@ fn watch_sway(app: AppHandle) {
                 list.clone()
             };
             let _ = app.emit("aura://recent", snapshot);
+            // Another window took focus (keyboard switch or click outside the pane): retract.
+            if moved {
+                let _ = app.emit("aura://outside", ());
+            }
         }
     });
 }
@@ -498,6 +593,27 @@ fn set_edge(app: AppHandle, edge: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Move the pane to the next monitor.
+#[tauri::command]
+fn next_screen(app: AppHandle) {
+    let _ = app.run_on_main_thread(|| {
+        PANE.with(|p| {
+            let Some(w) = p.borrow().clone() else { return };
+            let Some(gw) = w.window() else { return };
+            let display = gw.display();
+            let n = display.n_monitors();
+            if n < 2 {
+                return;
+            }
+            let current = display.monitor_at_window(&gw);
+            let i = (0..n).find(|&i| display.monitor(i) == current).unwrap_or(0);
+            if let Some(m) = display.monitor((i + 1) % n) {
+                w.set_monitor(&m);
+            }
+        });
+    });
+}
+
 #[tauri::command]
 fn set_expanded(app: AppHandle, expanded: bool) {
     let _ = app.run_on_main_thread(move || update_layout(|l| Layout { expanded, ..l }));
@@ -561,7 +677,7 @@ Answer briefly and plainly; Dule is not a developer. \
 What the pane can do: typing an app's name and pressing Enter starts that app; typing \"system\" opens \
 the PC health graph (health %, CPU, memory, temperature over the last 7 days, plus the issue list). \
 When Dule asks about the computer's state or a graph, the pane opens that graph for him; summarise the numbers \
-below in one or two sentences and point at the graph. You cannot run commands from the pane yet; say so instead \
+below in one or two sentences and point at the graph. Your agent tools (shell, files) are offline right now; say so instead \
 of inventing results. \
 Current PC health: {}% (CPU {:.0}%, memory {:.0}%, swap {:.0}%, fullest disk {:.0}%, hottest sensor {:.0}°C, \
 {} journal errors in the last hour). Issues: {}.",
@@ -569,7 +685,23 @@ Current PC health: {}% (CPU {:.0}%, memory {:.0}%, swap {:.0}%, fullest disk {:.
     )
 }
 
-/// Chat with aura-serve (OpenAI-style). Endpoint: $AURA_ENDPOINT or the local
+/// aura-serve's agent WebSocket for an engine endpoint: same host, ws scheme.
+fn agent_ws_url(endpoint: &str, token: &str) -> String {
+    let origin = endpoint.split("/v1/").next().unwrap_or(endpoint).replacen("http", "ws", 1);
+    format!("{origin}/?token={token}")
+}
+
+/// Where the pane's JS reaches the full aura-code agent (tools, shell, files).
+#[tauri::command]
+fn engine_ws() -> Result<String, String> {
+    let endpoint = std::env::var("AURA_ENDPOINT")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| ENGINE_URL.into());
+    Ok(agent_ws_url(&endpoint, &engine_token()?))
+}
+
+/// Fallback when the agent socket is down. Chat with aura-serve (OpenAI-style). Endpoint: $AURA_ENDPOINT or the local
 /// default; token: $AURA_TOKEN or ~/.aura/server-token, read on every call.
 #[tauri::command]
 async fn ask(app: AppHandle, messages: Vec<ChatMsg>) -> Result<String, String> {
@@ -634,6 +766,7 @@ fn main() {
         .manage(Recent(Mutex::new(Vec::new())))
         .invoke_handler(tauri::generate_handler![
             ask,
+            engine_ws,
             recent,
             focus_window,
             grab_focus,
@@ -642,6 +775,7 @@ fn main() {
             set_shown,
             set_edge,
             set_expanded,
+            next_screen,
             theme,
             apps,
             launch,
@@ -667,6 +801,28 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_at_prefers_floating_and_skips_hidden() {
+        let tree = json!({"nodes": [{"nodes": [
+            {"id": 1, "pid": 10, "visible": true, "rect": {"x": 0, "y": 0, "width": 960, "height": 1080}},
+            {"id": 2, "pid": 11, "visible": false, "rect": {"x": 960, "y": 0, "width": 960, "height": 1080}}
+        ], "floating_nodes": [
+            {"id": 3, "pid": 12, "visible": true, "rect": {"x": 100, "y": 100, "width": 200, "height": 200}}
+        ]}]});
+        assert_eq!(window_at(&tree, 50, 50), Some(1));
+        assert_eq!(window_at(&tree, 150, 150), Some(3));
+        assert_eq!(window_at(&tree, 1000, 50), None);
+    }
+
+    #[test]
+    fn agent_ws_url_keeps_host_and_swaps_scheme() {
+        assert_eq!(
+            agent_ws_url("http://127.0.0.1:7337/v1/chat/completions", "ab12"),
+            "ws://127.0.0.1:7337/?token=ab12"
+        );
+        assert_eq!(agent_ws_url("https://box:7337/v1/chat/completions", "t"), "wss://box:7337/?token=t");
+    }
 
     #[test]
     fn parses_theme_conf() {
